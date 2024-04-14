@@ -1,56 +1,86 @@
-import argparse
-import requests
+import socket
+import re
+import ssl
+import sys
 from bs4 import BeautifulSoup
+import urllib3 
+from tinydb import TinyDB, Query
 
+db = TinyDB('./cache.json')
+# User = Query()
 
-def main():
-    print ("Command:")
-    arg = input()
-    if (arg == "u"):
-        print("URL: ")
-        url = input()
-        print("Response: ")
-        fetch_url(url)
- 
-    if (arg == "s"):
-        print("Search Term: ")
-        search = input()
-        print("Results: ")
-        search_web(search)
+def send_http_request(host, port, path):
     
-    if (arg == "h"):
-        print(" u - html request \n s - search the web")
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+    print("Establishing websocket connection:", host, port, path, '\n')
 
-def fetch_url(url):
+    if port == 443:
+        client_socket = ssl.wrap_socket(client_socket)
+
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # Raise exception for unsuccessful requests
-        soup = BeautifulSoup(response.content, "html.parser")
-        text = soup.get_text(separator="\n")
-        print(text)
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching url: {e}")
+        client_socket.settimeout(2)
+        client_socket.connect((host, port))
 
+        request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"
+        client_socket.send(request.encode())
 
-def search_web(search_term):
-    # Replace this with your favorite search engine URL with "{}" as placeholder for search term
-    search_url = f"https://www.google.com/search?q={search_term}"
-    try:
-        response = requests.get(search_url)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
+        response = b""
+        
+        while True:
+            try:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                
+                response += data
+            
+            except socket.timeout:
+                break
 
-        # This extracts top 10 results based on a sample google search result structure, you might need to adjust this based on your chosen search engine
-        results = soup.find_all("a", href=lambda href: href and href.startswith("/url?q="))[:10]
-        i = 0
-        for result in results:
-            i+=1
-            print(i+": ")
-            print(result.get_text())
-    except requests.exceptions.RequestException as e:
-        print(f"Error searching the web: {e}")
+        resp_data = response.decode('utf-8', errors='ignore')
 
+        # Check for 301 redirect
+        while resp_data.startswith("HTTP/1.1 301") or resp_data.startswith("HTTP/1.1 302"):
+            # Extract new URL from the Location header
+            location_header = re.search(r'Location: (.+)\r\n', resp_data)
+            if location_header:
+                new_url = location_header.group(1)
+                print(f"Received 301 Redirect. Redirecting to: {new_url}")
+                # Parse new URL to get host, port, and path
+                parsed_url = urllib3.util.parse_url(new_url)
+                new_host = parsed_url.hostname
+                new_port = parsed_url.port if parsed_url.port else 443
+                new_path = '/search?q='+parameter
+                # Recursively call send_http_request with the new URL
+                return send_http_request(new_host, new_port, new_path)
+
+        return resp_data
+    
+    finally:
+        client_socket.close()
 
 if __name__ == "__main__":
-    main()
+    flag = sys.argv[1]
+    if (sys.argv.__len__() > 2):
+        parameter = sys.argv[2]
+    else:
+        parameter = ''
+    # print (flag)
+
+if (flag == "-u"):
+    response = send_http_request('mechim.github.io', 443, '/')
+    
+if (flag == "-s"):
+    # print (send_http_request('google.com', 443, '/search?q=cats'))
+    response = send_http_request('google.com', 443, '/search?q='+parameter)
+    http_info = response.split('<!doctype html>')[0]
+    cache_obj = {'http_info': http_info}
+    db.insert(cache_obj)
+    
+    soup = BeautifulSoup(response, 'html.parser')
+    for h3 in soup.find_all('h3'):
+        print(h3.get_text())
+
+if (flag == "-h"):
+    print("go2web -u <URL>         # make an HTTP request to the specified URL and print the response\ngo2web -s <search-term> # make an HTTP request to search the term using your favorite search engine and print top 10 results\ngo2web -h               # show this help")
